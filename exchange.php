@@ -115,7 +115,7 @@ function wc1c_set_output_callback() {
   ob_start('wc1c_output_callback');
 }
 
-function wc1c_strict_error_handler($errno, $errstr, $errfile, $errline, $errcontext) {
+function wc1c_strict_error_handler($errno, $errstr, $errfile, $errline, $errcontext = null) {
   if (error_reporting() === 0) return false;
 
   switch ($errno) {
