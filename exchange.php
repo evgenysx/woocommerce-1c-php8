@@ -327,7 +327,7 @@ function wc1c_set_transaction_mode() {
 
 function wc1c_transaction_shutdown_function() {
   $error = error_get_last();
-  $is_commit = $error['type'] > E_PARSE;
+  $is_commit = is_null($error)? true: $error['type'] > E_PARSE;
 
   wc1c_wpdb_end($is_commit);
 }

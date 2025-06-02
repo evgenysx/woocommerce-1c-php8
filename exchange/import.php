@@ -20,6 +20,9 @@ function wc1c_import_start_element_handler($is_full, $names, $depth, $name, $att
   if (!$depth && $name != 'КоммерческаяИнформация') {
     wc1c_error("XML parser misbehavior.");
   }
+  if ($depth < 1)
+    return;
+
   elseif (@$names[$depth - 1] == 'Классификатор' && $name == 'Группы') {
     $wc1c_groups = array();
     $wc1c_group_depth = -1;
@@ -27,9 +30,15 @@ function wc1c_import_start_element_handler($is_full, $names, $depth, $name, $att
   }
   elseif (@$names[$depth - 1] == 'Группы' && $name == 'Группа') {
     $wc1c_group_depth++;
+    if ($wc1c_group_depth < 1)
+      return;
+    if(!$wc1c_groups)
+      return;
     $wc1c_groups[] = array('ИдРодителя' => @$wc1c_groups[$wc1c_group_depth - 1]['Ид']);
   }
   elseif (@$names[$depth - 1] == 'Группа' && $name == 'Группы') {
+    if(!$wc1c_groups)
+      return;
     $result = wc1c_replace_group($is_full, $wc1c_groups[$wc1c_group_depth], $wc1c_group_order, $wc1c_groups);
     if ($result) $wc1c_group_order++;
 
@@ -57,6 +66,9 @@ function wc1c_import_start_element_handler($is_full, $names, $depth, $name, $att
     if (isset($attrs['Статус'])) {
       $wc1c_product['Статус'] = $attrs['Статус'];
     }
+  }
+  elseif (@$names[$depth - 1] == 'Предложение' && $name == 'БазоваяЕдиница') {
+    $wc1c_product = array('Пересчет' => array('Единица' => '', 'Коэффициент' => ''));
   }
   elseif (@$names[$depth - 1] == 'Товар' && $name == 'Группы') {
     $wc1c_product['Группы'] = array();
@@ -94,9 +106,11 @@ function wc1c_import_start_element_handler($is_full, $names, $depth, $name, $att
 
 function wc1c_import_character_data_handler($is_full, $names, $depth, $name, $data) {
   global $wc1c_groups, $wc1c_group_depth, $wc1c_property, $wc1c_product;
-
+  if ($depth < 2)
+    return;
   if (@$names[$depth - 2] == 'Группы' && @$names[$depth - 1] == 'Группа' && $name != 'Группы') {
-    @$wc1c_groups[$wc1c_group_depth][$name] .= $data;
+    if($wc1c_groups)
+      @$wc1c_groups[$wc1c_group_depth][$name] .= $data;
   }
   elseif (@$names[$depth - 2] == 'Свойства' && @$names[$depth - 1] == 'Свойство' && $name != 'ВариантыЗначений') {
     @$wc1c_property[$name] .= $data;
@@ -110,10 +124,20 @@ function wc1c_import_character_data_handler($is_full, $names, $depth, $name, $da
     @$wc1c_property['ВариантыЗначений'][$i][$name] .= $data;
   }
   elseif (@$names[$depth - 2] == 'Товары' && @$names[$depth - 1] == 'Товар' && !in_array($name, array('Группы', 'Картинка', 'Изготовитель', 'ХарактеристикиТовара', 'ЗначенияСвойств', 'СтавкиНалогов', 'ЗначенияРеквизитов'))) {
-    @$wc1c_product[$name] .= $data;
+    if(!isset($wc1c_product[$name]))
+      $wc1c_product[$name] = $data;
+    else
+      $wc1c_product[$name] .= $data;
   }
   elseif (@$names[$depth - 2] == 'БазоваяЕдиница' && @$names[$depth - 1] == 'Пересчет') {
-    @$wc1c_product['Пересчет'][$name] .= $data;
+     if(!isset($wc1c_product['Пересчет']))
+      $wc1c_product['Пересчет'] = [$name => $data];
+    else{
+      if(!isset($wc1c_product['Пересчет'][$name]))
+        $wc1c_product['Пересчет'][$name] = $data;
+      else
+        $wc1c_product['Пересчет'][$name] .= $data;
+    }
   }
   elseif (@$names[$depth - 2] == 'Товар' && @$names[$depth - 1] == 'Группы' && $name == 'Ид') {
     $i = count($wc1c_product['Группы']) - 1;
@@ -139,7 +163,10 @@ function wc1c_import_character_data_handler($is_full, $names, $depth, $name, $da
   elseif (@$names[$depth - 2] == 'ЗначенияРеквизитов' && @$names[$depth - 1] == 'ЗначениеРеквизита') {
     $i = count($wc1c_product['ЗначенияРеквизитов']) - 1;
     if ($name != 'Значение') {
-      @$wc1c_product['ЗначенияРеквизитов'][$i][$name] .= $data;
+      if (!isset($wc1c_product['ЗначенияРеквизитов'][$i][$name]))
+        $wc1c_product['ЗначенияРеквизитов'][$i][$name] = $data;
+      else
+        $wc1c_product['ЗначенияРеквизитов'][$i][$name] .= $data;
     }
     else {
       $j = count($wc1c_product['ЗначенияРеквизитов'][$i]['Значение']) - 1;
@@ -150,9 +177,21 @@ function wc1c_import_character_data_handler($is_full, $names, $depth, $name, $da
 
 function wc1c_import_end_element_handler($is_full, $names, $depth, $name) {
   global $wpdb, $wc1c_groups, $wc1c_group_depth, $wc1c_group_order, $wc1c_property, $wc1c_property_order, $wc1c_requisite_properties, $wc1c_product, $wc1c_subproducts;
+ 
+
+  if (!$depth && $name == 'КоммерческаяИнформация') {
+    $wpdb->query("DELETE FROM $wpdb->options WHERE option_name LIKE '_transient_%'");
+    wc1c_check_wpdb_error();
+
+    do_action('wc1c_post_import', $is_full);
+  }
+   if ($depth < 1)
+    return;
 
   if (@$names[$depth - 1] == 'Группы' && $name == 'Группа') {
     if (empty($wc1c_groups[$wc1c_group_depth]['Группы'])) {
+      if(!$wc1c_groups)
+        return;
       $result = wc1c_replace_group($is_full, $wc1c_groups[$wc1c_group_depth], $wc1c_group_order, $wc1c_groups);
       if ($result) $wc1c_group_order++;
     }
@@ -237,12 +276,7 @@ function wc1c_import_end_element_handler($is_full, $names, $depth, $name) {
     wc1c_clean_products($is_full);
     wc1c_clean_product_terms();
   }
-  elseif (!$depth && $name == 'КоммерческаяИнформация') {
-    $wpdb->query("DELETE FROM $wpdb->options WHERE option_name LIKE '_transient_%'");
-    wc1c_check_wpdb_error();
-
-    do_action('wc1c_post_import', $is_full);
-  }
+ 
 }
 
 function wc1c_term_id_by_meta($key, $value) {
@@ -571,6 +605,8 @@ function wc1c_replace_post($guid, $post_type, $is_deleted, $is_draft, $post_titl
   }
 
   foreach ($post_meta as $meta_key => $meta_value) {
+    if(!isset($current_post_meta[$meta_key]))
+      $current_post_meta[$meta_key] = null;
     $current_meta_value = @$current_post_meta[$meta_key];
     if ($current_meta_value == $meta_value) continue;
 
@@ -669,8 +705,8 @@ function wc1c_replace_product($is_full, $guid, $product) {
 
   $preserve_fields = apply_filters('wc1c_import_preserve_product_fields', array(), $product, $is_full);
 
-  $is_deleted = @$product['Статус'] == 'Удален';
-  $is_draft = @$product['Статус'] == 'Черновик';
+  $is_deleted = isset($product['Статус'])?$product['Статус'] == 'Удален':false;
+  $is_draft =  isset($product['Статус'])?$product['Статус'] == 'Черновик':false;
 
   $post_title = @$product['Наименование'];
   if (!$post_title) return;
