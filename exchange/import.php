@@ -113,7 +113,10 @@ function wc1c_import_character_data_handler($is_full, $names, $depth, $name, $da
       @$wc1c_groups[$wc1c_group_depth][$name] .= $data;
   }
   elseif (@$names[$depth - 2] == 'Свойства' && @$names[$depth - 1] == 'Свойство' && $name != 'ВариантыЗначений') {
-    @$wc1c_property[$name] .= $data;
+    if(!isset($wc1c_property[$name]))
+      $wc1c_property[$name] = $data;
+    else
+      $wc1c_property[$name] .= $data;
   }
   elseif (@$names[$depth - 2] == 'ХарактеристикиТовара' && @$names[$depth - 1] == 'ХарактеристикаТовара') {
     $i = count($wc1c_product['ХарактеристикиТовара']) - 1;
@@ -121,7 +124,10 @@ function wc1c_import_character_data_handler($is_full, $names, $depth, $name, $da
   }
   elseif (@$names[$depth - 2] == 'ВариантыЗначений' && @$names[$depth - 1] == 'Справочник') {
     $i = count($wc1c_property['ВариантыЗначений']) - 1;
-    @$wc1c_property['ВариантыЗначений'][$i][$name] .= $data;
+    if(!isset($wc1c_property['ВариантыЗначений'][$i][$name]))
+      $wc1c_property['ВариантыЗначений'][$i][$name] = $data;
+    else
+      $wc1c_property['ВариантыЗначений'][$i][$name] .= $data;
   }
   elseif (@$names[$depth - 2] == 'Товары' && @$names[$depth - 1] == 'Товар' && !in_array($name, array('Группы', 'Картинка', 'Изготовитель', 'ХарактеристикиТовара', 'ЗначенияСвойств', 'СтавкиНалогов', 'ЗначенияРеквизитов'))) {
     if(!isset($wc1c_product[$name]))
@@ -153,7 +159,10 @@ function wc1c_import_character_data_handler($is_full, $names, $depth, $name, $da
   elseif (@$names[$depth - 2] == 'ЗначенияСвойств' && @$names[$depth - 1] == 'ЗначенияСвойства') {
     $i = count($wc1c_product['ЗначенияСвойств']) - 1;
     if ($name != 'Значение') {
-      @$wc1c_product['ЗначенияСвойств'][$i][$name] .= $data;
+      if(!isset($wc1c_product['ЗначенияСвойств'][$i][$name]))
+        $wc1c_product['ЗначенияСвойств'][$i][$name] = $data;
+      else
+        $wc1c_product['ЗначенияСвойств'][$i][$name] .= $data;
     }
     else {
       $j = count($wc1c_product['ЗначенияСвойств'][$i]['Значение']) - 1;
@@ -451,7 +460,7 @@ function wc1c_replace_woocommerce_attribute($is_full, $guid, $attribute_label, $
   global $wpdb;
 
   $guids = get_option('wc1c_guid_attributes', array());
-  $attribute_id = @$guids[$guid];
+  $attribute_id = $guids[$guid]??null;
 
   if ($attribute_id) {
     $attribute_id = $wpdb->get_var($wpdb->prepare("SELECT attribute_id FROM {$wpdb->prefix}woocommerce_attribute_taxonomies WHERE attribute_id = %d", $attribute_id));
@@ -674,13 +683,13 @@ function wc1c_replace_post_attachments($post_id, $attachments) {
     if (!file_exists($attachment_path)) continue;
 
     $attachment_hash = $attachment_hash_by_path[$attachment_path];
-    $attachment_id = @$post_attachment_id_by_hash[$attachment_hash];
+    $attachment_id = $post_attachment_id_by_hash[$attachment_hash]??null;
     if (!$attachment_id) {
       $file = array(
         'tmp_name' => $attachment_path,
         'name' => basename($attachment_path),
       );
-      $attachment_id = @media_handle_sideload($file, $post_id, @$attachment['description']);
+      $attachment_id = @media_handle_sideload($file, $post_id, $attachment['description']??null);
       wc1c_check_wp_error($attachment_id);
       
       $uploaded_attachment_path = get_attached_file($attachment_id);
@@ -974,7 +983,7 @@ function wc1c_replace_product($is_full, $guid, $product) {
         '_thumbnail_id' => @$attachment_ids[0],
       );
       foreach ($new_post_meta as $meta_key => $meta_value) {
-        if ($meta_value != @$post_meta[$meta_key]) update_post_meta($post_id, $meta_key, $meta_value);
+        if ($meta_value != ($post_meta[$meta_key]??null)) update_post_meta($post_id, $meta_key, $meta_value);
       }
     }
   }
