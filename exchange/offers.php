@@ -7,6 +7,8 @@ if (!defined('WC1C_PRESERVE_PRODUCT_VARIATIONS')) define('WC1C_PRESERVE_PRODUCT_
 function wc1c_offers_start_element_handler($is_full, $names, $depth, $name, $attrs) {
   global $wc1c_price_types, $wc1c_offer, $wc1c_price;
 
+  if($depth < 1) return;
+
   if (@$names[$depth - 1] == 'ПакетПредложений' && $name == 'ТипыЦен') {
     $wc1c_price_types = array();
   }
@@ -14,7 +16,9 @@ function wc1c_offers_start_element_handler($is_full, $names, $depth, $name, $att
     $wc1c_price_types[] = array();
   }
   elseif (@$names[$depth - 1] == 'Предложение' && $name == 'Склад') {
-    @$wc1c_offer['КоличествоНаСкладе'] += $attrs['КоличествоНаСкладе'];
+    if(!isset($wc1c_offer['КоличествоНаСкладе']))
+      $wc1c_offer['КоличествоНаСкладе'] = 0;
+    $wc1c_offer['КоличествоНаСкладе'] += $attrs['КоличествоНаСкладе'];
   }
   elseif (@$names[$depth - 1] == 'Предложения' && $name == 'Предложение') {
     $wc1c_offer = array(
@@ -32,24 +36,44 @@ function wc1c_offers_start_element_handler($is_full, $names, $depth, $name, $att
 function wc1c_offers_character_data_handler($is_full, $names, $depth, $name, $data) {
   global $wc1c_price_types, $wc1c_offer, $wc1c_price;
 
+  if($depth < 2) return;
+
   if (@$names[$depth - 2] == 'ТипыЦен' && @$names[$depth - 1] == 'ТипЦены' && $name != 'Налог') {
     $i = count($wc1c_price_types) - 1;
-    @$wc1c_price_types[$i][$name] .= $data;
+    if(!isset($wc1c_price_types[$i][$name]))
+      $wc1c_price_types[$i][$name] = $data;
+    else
+      $wc1c_price_types[$i][$name] .= $data;
   }
   elseif (@$names[$depth - 2] == 'Предложения' && @$names[$depth - 1] == 'Предложение' && !in_array($name, array('БазоваяЕдиница', 'ХарактеристикиТовара', 'Цены'))) {
-    @$wc1c_offer[$name] .= $data;
+    if(!isset($wc1c_offer[$name]))
+      $wc1c_offer[$name] = $data;
+    else
+      $wc1c_offer[$name] .= $data;
   }
   elseif (@$names[$depth - 2] == 'ХарактеристикиТовара' && @$names[$depth - 1] == 'ХарактеристикаТовара') {
     $i = count($wc1c_offer['ХарактеристикиТовара']) - 1;
     @$wc1c_offer['ХарактеристикиТовара'][$i][$name] .= $data;
   }
   elseif (@$names[$depth - 2] == 'Цены' && @$names[$depth - 1] == 'Цена') {
-    @$wc1c_price[$name] .= $data;
+    if(!isset($wc1c_price[$name]))
+      $wc1c_price[$name] = $data;
+    else
+      $wc1c_price[$name] .= $data;
   }
 }
 
 function wc1c_offers_end_element_handler($is_full, $names, $depth, $name) {
   global $wpdb, $wc1c_price_types, $wc1c_price_type, $wc1c_price_type, $wc1c_offer, $wc1c_suboffers, $wc1c_price;
+
+  if (!$depth && $name == 'КоммерческаяИнформация') {
+    $wpdb->query("DELETE FROM $wpdb->options WHERE option_name LIKE '_transient_%'");
+    wc1c_check_wpdb_error();
+
+    do_action('wc1c_post_offers', $is_full);
+  }
+
+   if($depth < 1) return;
 
   if (@$names[$depth - 1] == 'ПакетПредложений' && $name == 'ТипыЦен') {
     if (!WC1C_PRICE_TYPE) {
@@ -111,12 +135,6 @@ function wc1c_offers_end_element_handler($is_full, $names, $depth, $name) {
   elseif (@$names[$depth - 1] == 'ПакетПредложений' && $name == 'Предложения') {
     if ($wc1c_suboffers) wc1c_replace_suboffers($is_full, $wc1c_suboffers);
   }
-  elseif (!$depth && $name == 'КоммерческаяИнформация') {
-    $wpdb->query("DELETE FROM $wpdb->options WHERE option_name LIKE '_transient_%'");
-    wc1c_check_wpdb_error();
-
-    do_action('wc1c_post_offers', $is_full);
-  }
 }
 
 function wc1c_update_currency($currency) {
@@ -145,15 +163,15 @@ function wc1c_replace_offer_post_meta($is_full, $post_id, $offer, $attributes = 
     $post_meta['_manage_stock'] = WC1C_MANAGE_STOCK;
   }
 
+  $current_post_meta = get_post_meta($post_id);
+    foreach ($current_post_meta as $meta_key => $meta_value) {
+      $current_post_meta[$meta_key] = $meta_value[0];
+    }
+
   if ($attributes) {
     foreach ($attributes as $attribute_name => $attribute_value) {
       $meta_key = 'attribute_' . sanitize_title($attribute_name);
       $post_meta[$meta_key] = $attribute_value;
-    }
-
-    $current_post_meta = get_post_meta($post_id);
-    foreach ($current_post_meta as $meta_key => $meta_value) {
-      $current_post_meta[$meta_key] = $meta_value[0];
     }
 
     foreach ($current_post_meta as $meta_key => $meta_value) {
@@ -164,9 +182,9 @@ function wc1c_replace_offer_post_meta($is_full, $post_id, $offer, $attributes = 
   }
 
   if (!is_null($price)) {
-    $sale_price = @$current_post_meta['_sale_price'];
-    $sale_price_from = @$current_post_meta['_sale_price_dates_from'];
-    $sale_price_to = @$current_post_meta['_sale_price_dates_to'];
+    //$sale_price = @$current_post_meta['_sale_price'];
+    $sale_price_from = $current_post_meta['_sale_price_dates_from']??null;
+    $sale_price_to = $current_post_meta['_sale_price_dates_to']??null;
     if (empty($current_post_meta['_sale_price'])) {
       $post_meta['_price'] = $price;
     }
@@ -189,7 +207,7 @@ function wc1c_replace_offer_post_meta($is_full, $post_id, $offer, $attributes = 
   }
 
   foreach ($post_meta as $meta_key => $meta_value) {
-    $current_meta_value = @$current_post_meta[$meta_key];
+    $current_meta_value = $current_post_meta[$meta_key]??null;
     if ($meta_value !== '' && $current_meta_value == $meta_value) continue;
     if ($meta_value === '' && $current_meta_value === $meta_value) continue;
 
