@@ -4,6 +4,29 @@ if (!defined('ABSPATH')) exit;
 if (!defined('WC1C_PRICE_TYPE')) define('WC1C_PRICE_TYPE', null);
 if (!defined('WC1C_PRESERVE_PRODUCT_VARIATIONS')) define('WC1C_PRESERVE_PRODUCT_VARIATIONS', false);
 
+
+function proccess_1c_file($path_file)
+{
+  global $smpl_xml;
+  $smpl_xml = simplexml_load_file($path_file);
+
+  $offers_1с = $smpl_xml->ПакетПредложений->Предложения->Предложение;
+  import_price($offers_1с);
+
+}
+
+function import_price($offers_1с)
+{
+ for ($i = 0; $i < $offers_1с->count(); $i++) {
+    $offer_1с = $offers_1с[$i];
+    $article = $offer_1с->Артикул->__toString();
+    $product_id = wc_get_product_id_by_sku($article);
+    $product = wc_get_product($product_id);
+    $product->set_regular_price($offer_1с->Цены->Цена->ЦенаЗаЕдиницу);
+    $product->save();
+ }
+}
+
 function wc1c_offers_start_element_handler($is_full, $names, $depth, $name, $attrs) {
   global $wc1c_price_types, $wc1c_offer, $wc1c_price;
 

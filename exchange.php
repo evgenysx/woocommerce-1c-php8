@@ -438,8 +438,8 @@ function wc1c_mode_import($type, $filename, $namespace = null) {
   if ($type == 'catalog') wc1c_unpack_files($type);
 
   $path = WC1C_DATA_DIR . "$type/$filename";
-  $fp = fopen($path, 'r') or wc1c_error(sprintf("Failed to open file %s", $filename));
-  flock($fp, LOCK_EX) or wc1c_error(sprintf("Failed to lock file %s", $filename));
+  // $fp = fopen($path, 'r') or wc1c_error(sprintf("Failed to open file %s", $filename));
+  // flock($fp, LOCK_EX) or wc1c_error(sprintf("Failed to lock file %s", $filename));
 
   wc1c_set_transaction_mode();
 
@@ -447,16 +447,18 @@ function wc1c_mode_import($type, $filename, $namespace = null) {
   if (!in_array($namespace, array('import', 'offers', 'orders'))) wc1c_error(sprintf("Unknown import file type: %s", $namespace));
 
   $wc1c_namespace = $namespace;
-  list($wc1c_is_full, $wc1c_is_moysklad) = wc1c_xml_parse_head($fp);
+  //list($wc1c_is_full, $wc1c_is_moysklad) = wc1c_xml_parse_head($fp);
   $wc1c_names = array();
   $wc1c_depth = -1;
 
   require_once sprintf(WC1C_PLUGIN_DIR . "exchange/%s.php", $namespace);
 
-  wc1c_xml_parse($fp);
+  proccess_1c_file($path);
+ 
+  //wc1c_xml_parse($fp);
 
-  flock($fp, LOCK_UN) or wc1c_error(sprintf("Failed to unlock file %s", $filename));
-  fclose($fp) or wc1c_error(sprintf("Failed to close file %s", $filename));
+  // flock($fp, LOCK_UN) or wc1c_error(sprintf("Failed to unlock file %s", $filename));
+  // fclose($fp) or wc1c_error(sprintf("Failed to close file %s", $filename));
 
   exit("success");
 }

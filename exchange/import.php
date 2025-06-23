@@ -14,7 +14,178 @@ if (!defined('WC1C_MATCH_PROPERTIES_BY_TITLE')) define('WC1C_MATCH_PROPERTIES_BY
 if (!defined('WC1C_MATCH_PROPERTY_OPTIONS_BY_TITLE')) define('WC1C_MATCH_PROPERTY_OPTIONS_BY_TITLE', false);
 if (!defined('WC1C_USE_GUID_AS_PROPERTY_OPTION_SLUG')) define('WC1C_USE_GUID_AS_PROPERTY_OPTION_SLUG', true);
 
-function wc1c_import_start_element_handler($is_full, $names, $depth, $name, $attrs) {
+
+function proccess_1c_file($path_file)
+{
+  global $smpl_xml;
+  $smpl_xml = simplexml_load_file($path_file);
+
+  // импортируем характеристики товаров
+  $properties_1c = $smpl_xml->Классификатор->Свойства->Свойство;
+  $props_map = import_properties_1c($properties_1c);
+  // сами товары
+  $products_1с = $smpl_xml->Каталог->Товары->Товар;
+  import_products_1с($products_1с, $props_map);
+}
+
+function getCategoryBy_1cId($category_1c)
+{
+  if ($category_1c == '58211538-46a1-11f0-8ddb-3cd92bfac748')
+    $groupSlug = "batt";
+  return get_term_by('slug', $groupSlug, 'product_cat');
+}
+
+function get_ACF_key_by_1C_prop($prop){
+  switch ($prop){
+    case '121d35dc-d0b7-11ee-8d18-5404a6a42763': return "akb_type";
+    case '7f7b96d2-d0b7-11ee-8d18-5404a6a42763': return "akb_capacity";
+    case '33d95ba6-d549-11ee-8d18-5404a6a42763': return ""; // ток нагрузки bms
+    case '73173116-031b-11f0-854e-5404a6a42763': return "akb_voltage";
+    default: return "";
+  }
+}
+
+function get_ACF_value_by_1C_prop($prop){
+  if ($prop == 'xxx')
+    return "yyy";
+
+  return $prop;
+}
+
+function updateProductProp($product, &$props_1c, &$props_map)
+{
+  for ($i = 0; $i < $props_1c->count(); $i++) {
+    $prop_1c = $props_1c[$i];
+    
+    $val_prop = $prop_1c->Значение->__toString();
+    $prop_value = isset($props_map[$val_prop])? $props_map[$val_prop]:$val_prop;
+    $meta_key = get_ACF_key_by_1C_prop($prop_1c->Ид->__toString());
+    if(!$meta_key) continue;
+    $product->add_meta_data($meta_key, $prop_value, true);
+  }
+}
+
+function import_products_1с($products_1с, &$props_map)
+{
+  $brand = get_term_by('name', "ЛиСТ", 'manufacture');
+
+  for ($i = 0; $i < $products_1с->count(); $i++) {
+    $is_changed =  false;
+    $product_1c = $products_1с[$i];
+    $article = $product_1c->Артикул->__toString();
+    $product_id = wc_get_product_id_by_sku($article);
+    $product = new WC_Product_Simple($product_id);
+    if (!$product_id) {
+      $product = new WC_Product_Simple();
+      $product->set_name($product_1c->Наименование->__toString());
+      $product->set_description($product_1c->Описание->__toString());
+      $product->add_meta_data("_sku", $article, true);
+
+      $category_1c = $product_1c->Группы->Ид->__toString();
+      $category = getCategoryBy_1cId($category_1c);
+      $product->set_category_ids(array($category->term_id));
+      if($category->slug == 'batt'){
+        $product->add_meta_data("brand", $brand->term_id, true);
+      }
+    }
+
+    updateProductProp($product, $product_1c->ЗначенияСвойств->ЗначенияСвойства, $props_map);
+    // сохраняем до обработки изображений
+    $product->save();
+
+    // Изображения
+    $attachments = array();
+    if (!empty($product_1c->Картинка)) {
+      $attachments = array_filter((array)$product_1c->Картинка);
+      $attachments = array_fill_keys($attachments, array());
+    }
+
+    if ($product_1c->ЗначенияРеквизитов) {
+      $attachment_keys = array(
+        'ОписаниеФайла' => 'description',
+      );
+      foreach (($product_1c->ЗначенияРеквизитов->ЗначениеРеквизита) as $requisite_obj) {
+        $requisite = (array)$requisite_obj;
+        $attribute_name = $requisite['Наименование'];
+        if (!isset($attachment_keys[$attribute_name])) continue;
+
+        $attribute_values = @$requisite['Значение'];
+        if (!$attribute_values) continue;
+
+        $attribute_value = $attribute_values[0];
+        if (strpos($attribute_value, "import_files/") !== 0) continue;
+
+        list($picture_path, $attribute_value) = explode('#', $attribute_value, 2);
+        if (!isset($attachments[$picture_path])) continue;
+
+        $attachment_key = $attachment_keys[$attribute_name];
+        $attachments[$picture_path][$attachment_key] = $attribute_value;
+      }
+    }
+
+    $post_id = $product->get_id();
+    $post_meta = get_post_meta($post_id);
+    if ($attachments) {
+      $attachment_ids = wc1c_replace_post_attachments($post_id, $attachments);
+
+      $new_post_meta = array(
+        '_product_image_gallery' => implode(',', array_slice($attachment_ids, 1)),
+        '_thumbnail_id' => @$attachment_ids[0],
+      );
+       foreach ($new_post_meta as $meta_key => $meta_value) {
+        if ($meta_value != ($post_meta[$meta_key] ?? null)) update_post_meta($post_id, $meta_key, $meta_value);
+      }
+    }
+    
+    
+  }
+  
+}
+
+/**
+ * Импорт свойств
+ */
+function import_properties_1c($properties_1с)
+{
+  $product_props = [];
+  for ($i = 0; $i < $properties_1с->count(); $i++) {
+    $prop_1c = $properties_1с[$i];
+    if ($prop_1c->ТипЗначений == 'Справочник') {
+      $prop_vals = $prop_1c->ВариантыЗначений->Справочник;
+      for ($j = 0; $j < $prop_vals->count(); $j++) {
+        $product_props[$prop_vals[$j]->ИдЗначения->__toString()] = 
+          filter_1c_prop_value($prop_1c->Ид->__toString(), $prop_vals[$j]->ИдЗначения->__toString(), $prop_vals[$j]->Значение->__toString());      
+      }
+    }else if ($prop_1c->ТипЗначений == 'Строка') {
+      //$product_props[$prop_1c->Ид->__toString()] = $prop_1c->Наименование->__toString();
+    }
+    $product_props[$prop_1c->Ид->__toString()] = $prop_1c->Наименование->__toString();
+    
+  }
+  return $product_props;
+}
+
+// приводим типы мз 1С к типам ACF-полей
+function filter_1c_prop_value($prop_id, $val_id, $value){
+  if($val_id == '1be1eb76-d0b7-11ee-8d18-5404a6a42763' && $value == "LiFePO4"){
+    return "LiFeFo4";
+  }
+  else if($val_id == 'a745b404-ec28-11ee-9d05-5404a6a42763'){
+    return explode(" ", $value)[0]; // Емкость АКБ
+  }else if ($prop_id == '73173116-031b-11f0-854e-5404a6a42763'){
+    // номинальное напряжение
+    return explode(" ", $value)[0];
+  }
+
+  return $value;
+}
+
+function get1CGroupBy_Id($Id) {}
+
+function update_product_woo_1c() {}
+
+function wc1c_import_start_element_handler($is_full, $names, $depth, $name, $attrs)
+{
   global $wc1c_groups, $wc1c_group_depth, $wc1c_group_order, $wc1c_property, $wc1c_property_order, $wc1c_requisite_properties, $wc1c_product;
 
   if (!$depth && $name != 'КоммерческаяИнформация') {
@@ -27,37 +198,30 @@ function wc1c_import_start_element_handler($is_full, $names, $depth, $name, $att
     $wc1c_groups = array();
     $wc1c_group_depth = -1;
     $wc1c_group_order = 1;
-  }
-  elseif (@$names[$depth - 1] == 'Группы' && $name == 'Группа') {
+  } elseif (@$names[$depth - 1] == 'Группы' && $name == 'Группа') {
     $wc1c_group_depth++;
     if ($wc1c_group_depth < 1)
       return;
-    if(!$wc1c_groups)
+    if (!$wc1c_groups)
       return;
     $wc1c_groups[] = array('ИдРодителя' => @$wc1c_groups[$wc1c_group_depth - 1]['Ид']);
-  }
-  elseif (@$names[$depth - 1] == 'Группа' && $name == 'Группы') {
-    if(!$wc1c_groups)
+  } elseif (@$names[$depth - 1] == 'Группа' && $name == 'Группы') {
+    if (!$wc1c_groups)
       return;
     $result = wc1c_replace_group($is_full, $wc1c_groups[$wc1c_group_depth], $wc1c_group_order, $wc1c_groups);
     if ($result) $wc1c_group_order++;
 
     $wc1c_groups[$wc1c_group_depth]['Группы'] = true;
-  }
-  elseif (@$names[$depth - 1] == 'Классификатор' && $name == 'Свойства') {
+  } elseif (@$names[$depth - 1] == 'Классификатор' && $name == 'Свойства') {
     $wc1c_property_order = 1;
     $wc1c_requisite_properties = array();
-  }
-  elseif (@$names[$depth - 1] == 'Свойства' && $name == 'Свойство') {
+  } elseif (@$names[$depth - 1] == 'Свойства' && $name == 'Свойство') {
     $wc1c_property = array();
-  }
-  elseif (@$names[$depth - 1] == 'Свойство' && $name == 'ВариантыЗначений') {
+  } elseif (@$names[$depth - 1] == 'Свойство' && $name == 'ВариантыЗначений') {
     $wc1c_property['ВариантыЗначений'] = array();
-  }
-  elseif (@$names[$depth - 1] == 'ВариантыЗначений' && $name == 'Справочник') {
+  } elseif (@$names[$depth - 1] == 'ВариантыЗначений' && $name == 'Справочник') {
     $wc1c_property['ВариантыЗначений'][] = array();
-  }
-  elseif (@$names[$depth - 1] == 'Товары' && $name == 'Товар') {
+  } elseif (@$names[$depth - 1] == 'Товары' && $name == 'Товар') {
     $wc1c_product = array(
       'ХарактеристикиТовара' => array(),
       'ЗначенияСвойств' => array(),
@@ -66,127 +230,107 @@ function wc1c_import_start_element_handler($is_full, $names, $depth, $name, $att
     if (isset($attrs['Статус'])) {
       $wc1c_product['Статус'] = $attrs['Статус'];
     }
-  }
-  elseif (@$names[$depth - 1] == 'Предложение' && $name == 'БазоваяЕдиница') {
+  } elseif (@$names[$depth - 1] == 'Предложение' && $name == 'БазоваяЕдиница') {
     $wc1c_product = array('Пересчет' => array('Единица' => '', 'Коэффициент' => ''));
-  }
-  elseif (@$names[$depth - 1] == 'Товар' && $name == 'Группы') {
+  } elseif (@$names[$depth - 1] == 'Товар' && $name == 'Группы') {
     $wc1c_product['Группы'] = array();
-  }
-  elseif (@$names[$depth - 1] == 'Группы' && $name == 'Ид') {
+  } elseif (@$names[$depth - 1] == 'Группы' && $name == 'Ид') {
     $wc1c_product['Группы'][] = '';
-  }
-  elseif (@$names[$depth - 1] == 'Товар' && $name == 'Картинка') {
+  } elseif (@$names[$depth - 1] == 'Товар' && $name == 'Картинка') {
     if (!isset($wc1c_product['Картинка'])) $wc1c_product['Картинка'] = array();
     $wc1c_product['Картинка'][] = '';
-  }
-  elseif (@$names[$depth - 1] == 'Товар' && $name == 'Изготовитель') {
+  } elseif (@$names[$depth - 1] == 'Товар' && $name == 'Изготовитель') {
     $wc1c_product['Изготовитель'] = array();
-  }
-  elseif (@$names[$depth - 1] == 'ХарактеристикиТовара' && $name == 'ХарактеристикаТовара') {
+  } elseif (@$names[$depth - 1] == 'ХарактеристикиТовара' && $name == 'ХарактеристикаТовара') {
     $wc1c_product['ХарактеристикиТовара'][] = array();
-  }
-  elseif (@$names[$depth - 1] == 'ЗначенияСвойств' && $name == 'ЗначенияСвойства') {
+  } elseif (@$names[$depth - 1] == 'ЗначенияСвойств' && $name == 'ЗначенияСвойства') {
     $wc1c_product['ЗначенияСвойств'][] = array();
-  }
-  elseif (@$names[$depth - 1] == 'ЗначенияСвойства' && $name == 'Значение') {
+  } elseif (@$names[$depth - 1] == 'ЗначенияСвойства' && $name == 'Значение') {
     $i = count($wc1c_product['ЗначенияСвойств']) - 1;
     if (!isset($wc1c_product['ЗначенияСвойств'][$i]['Значение'])) $wc1c_product['ЗначенияСвойств'][$i]['Значение'] = array();
     $wc1c_product['ЗначенияСвойств'][$i]['Значение'][] = '';
-  }
-  elseif (@$names[$depth - 1] == 'ЗначенияРеквизитов' && $name == 'ЗначениеРеквизита') {
+  } elseif (@$names[$depth - 1] == 'ЗначенияРеквизитов' && $name == 'ЗначениеРеквизита') {
     $wc1c_product['ЗначенияРеквизитов'][] = array();
-  }
-  elseif (@$names[$depth - 1] == 'ЗначениеРеквизита' && $name == 'Значение') {
+  } elseif (@$names[$depth - 1] == 'ЗначениеРеквизита' && $name == 'Значение') {
     $i = count($wc1c_product['ЗначенияРеквизитов']) - 1;
     if (!isset($wc1c_product['ЗначенияРеквизитов'][$i]['Значение'])) $wc1c_product['ЗначенияРеквизитов'][$i]['Значение'] = array();
     $wc1c_product['ЗначенияРеквизитов'][$i]['Значение'][] = '';
   }
 }
 
-function wc1c_import_character_data_handler($is_full, $names, $depth, $name, $data) {
+function wc1c_import_character_data_handler($is_full, $names, $depth, $name, $data)
+{
   global $wc1c_groups, $wc1c_group_depth, $wc1c_property, $wc1c_product;
   if ($depth < 2)
     return;
   if (@$names[$depth - 2] == 'Группы' && @$names[$depth - 1] == 'Группа' && $name != 'Группы') {
-    if($wc1c_groups)
+    if ($wc1c_groups)
       @$wc1c_groups[$wc1c_group_depth][$name] .= $data;
-  }
-  elseif (@$names[$depth - 2] == 'Свойства' && @$names[$depth - 1] == 'Свойство' && $name != 'ВариантыЗначений') {
-    if(!isset($wc1c_property[$name]))
+  } elseif (@$names[$depth - 2] == 'Свойства' && @$names[$depth - 1] == 'Свойство' && $name != 'ВариантыЗначений') {
+    if (!isset($wc1c_property[$name]))
       $wc1c_property[$name] = $data;
     else
       $wc1c_property[$name] .= $data;
-  }
-  elseif (@$names[$depth - 2] == 'ХарактеристикиТовара' && @$names[$depth - 1] == 'ХарактеристикаТовара') {
+  } elseif (@$names[$depth - 2] == 'ХарактеристикиТовара' && @$names[$depth - 1] == 'ХарактеристикаТовара') {
     $i = count($wc1c_product['ХарактеристикиТовара']) - 1;
     @$wc1c_product['ХарактеристикиТовара'][$i][$name] .= $data;
-  }
-  elseif (@$names[$depth - 2] == 'ВариантыЗначений' && @$names[$depth - 1] == 'Справочник') {
+  } elseif (@$names[$depth - 2] == 'ВариантыЗначений' && @$names[$depth - 1] == 'Справочник') {
     $i = count($wc1c_property['ВариантыЗначений']) - 1;
-    if(!isset($wc1c_property['ВариантыЗначений'][$i][$name]))
+    if (!isset($wc1c_property['ВариантыЗначений'][$i][$name]))
       $wc1c_property['ВариантыЗначений'][$i][$name] = $data;
     else
       $wc1c_property['ВариантыЗначений'][$i][$name] .= $data;
-  }
-  elseif (@$names[$depth - 2] == 'Товары' && @$names[$depth - 1] == 'Товар' && !in_array($name, array('Группы', 'Картинка', 'Изготовитель', 'ХарактеристикиТовара', 'ЗначенияСвойств', 'СтавкиНалогов', 'ЗначенияРеквизитов'))) {
-    if(!isset($wc1c_product[$name]))
+  } elseif (@$names[$depth - 2] == 'Товары' && @$names[$depth - 1] == 'Товар' && !in_array($name, array('Группы', 'Картинка', 'Изготовитель', 'ХарактеристикиТовара', 'ЗначенияСвойств', 'СтавкиНалогов', 'ЗначенияРеквизитов'))) {
+    if (!isset($wc1c_product[$name]))
       $wc1c_product[$name] = $data;
     else
       $wc1c_product[$name] .= $data;
-  }
-  elseif (@$names[$depth - 2] == 'БазоваяЕдиница' && @$names[$depth - 1] == 'Пересчет') {
-     if(!isset($wc1c_product['Пересчет']))
+  } elseif (@$names[$depth - 2] == 'БазоваяЕдиница' && @$names[$depth - 1] == 'Пересчет') {
+    if (!isset($wc1c_product['Пересчет']))
       $wc1c_product['Пересчет'] = [$name => $data];
-    else{
-      if(!isset($wc1c_product['Пересчет'][$name]))
+    else {
+      if (!isset($wc1c_product['Пересчет'][$name]))
         $wc1c_product['Пересчет'][$name] = $data;
       else
         $wc1c_product['Пересчет'][$name] .= $data;
     }
-  }
-  elseif (@$names[$depth - 2] == 'Товар' && @$names[$depth - 1] == 'Группы' && $name == 'Ид') {
+  } elseif (@$names[$depth - 2] == 'Товар' && @$names[$depth - 1] == 'Группы' && $name == 'Ид') {
     $i = count($wc1c_product['Группы']) - 1;
     @$wc1c_product['Группы'][$i] .= $data;
-  }
-  elseif (@$names[$depth - 2] == 'Товары' && @$names[$depth - 1] == 'Товар' && $name == 'Картинка') {
+  } elseif (@$names[$depth - 2] == 'Товары' && @$names[$depth - 1] == 'Товар' && $name == 'Картинка') {
     $i = count($wc1c_product['Картинка']) - 1;
     @$wc1c_product['Картинка'][$i] .= $data;
-  }
-  elseif (@$names[$depth - 2] == 'Товар' && @$names[$depth - 1] == 'Изготовитель') {
+  } elseif (@$names[$depth - 2] == 'Товар' && @$names[$depth - 1] == 'Изготовитель') {
     @$wc1c_product['Изготовитель'][$name] .= $data;
-  }
-  elseif (@$names[$depth - 2] == 'ЗначенияСвойств' && @$names[$depth - 1] == 'ЗначенияСвойства') {
+  } elseif (@$names[$depth - 2] == 'ЗначенияСвойств' && @$names[$depth - 1] == 'ЗначенияСвойства') {
     $i = count($wc1c_product['ЗначенияСвойств']) - 1;
     if ($name != 'Значение') {
-      if(!isset($wc1c_product['ЗначенияСвойств'][$i][$name]))
+      if (!isset($wc1c_product['ЗначенияСвойств'][$i][$name]))
         $wc1c_product['ЗначенияСвойств'][$i][$name] = $data;
       else
         $wc1c_product['ЗначенияСвойств'][$i][$name] .= $data;
-    }
-    else {
+    } else {
       $j = count($wc1c_product['ЗначенияСвойств'][$i]['Значение']) - 1;
       @$wc1c_product['ЗначенияСвойств'][$i]['Значение'][$j] .= $data;
     }
-  }
-  elseif (@$names[$depth - 2] == 'ЗначенияРеквизитов' && @$names[$depth - 1] == 'ЗначениеРеквизита') {
+  } elseif (@$names[$depth - 2] == 'ЗначенияРеквизитов' && @$names[$depth - 1] == 'ЗначениеРеквизита') {
     $i = count($wc1c_product['ЗначенияРеквизитов']) - 1;
     if ($name != 'Значение') {
       if (!isset($wc1c_product['ЗначенияРеквизитов'][$i][$name]))
         $wc1c_product['ЗначенияРеквизитов'][$i][$name] = $data;
       else
         $wc1c_product['ЗначенияРеквизитов'][$i][$name] .= $data;
-    }
-    else {
+    } else {
       $j = count($wc1c_product['ЗначенияРеквизитов'][$i]['Значение']) - 1;
       @$wc1c_product['ЗначенияРеквизитов'][$i]['Значение'][$j] .= $data;
     }
   }
 }
 
-function wc1c_import_end_element_handler($is_full, $names, $depth, $name) {
+function wc1c_import_end_element_handler($is_full, $names, $depth, $name)
+{
   global $wpdb, $wc1c_groups, $wc1c_group_depth, $wc1c_group_order, $wc1c_property, $wc1c_property_order, $wc1c_requisite_properties, $wc1c_product, $wc1c_subproducts;
- 
+
 
   if (!$depth && $name == 'КоммерческаяИнформация') {
     $wpdb->query("DELETE FROM $wpdb->options WHERE option_name LIKE '_transient_%'");
@@ -194,12 +338,12 @@ function wc1c_import_end_element_handler($is_full, $names, $depth, $name) {
 
     do_action('wc1c_post_import', $is_full);
   }
-   if ($depth < 1)
+  if ($depth < 1)
     return;
 
   if (@$names[$depth - 1] == 'Группы' && $name == 'Группа') {
     if (empty($wc1c_groups[$wc1c_group_depth]['Группы'])) {
-      if(!$wc1c_groups)
+      if (!$wc1c_groups)
         return;
       $result = wc1c_replace_group($is_full, $wc1c_groups[$wc1c_group_depth], $wc1c_group_order, $wc1c_groups);
       if ($result) $wc1c_group_order++;
@@ -210,25 +354,21 @@ function wc1c_import_end_element_handler($is_full, $names, $depth, $name) {
   }
   if (@$names[$depth - 1] == 'Классификатор' && $name == 'Группы') {
     wc1c_clean_woocommerce_categories($is_full);
-  }
-  elseif (@$names[$depth - 1] == 'Свойства' && $name == 'Свойство') {
+  } elseif (@$names[$depth - 1] == 'Свойства' && $name == 'Свойство') {
     $result = wc1c_replace_property($is_full, $wc1c_property, $wc1c_property_order);
     if ($result) {
       $attribute_taxonomy = $result;
       $wc1c_property_order++;
 
       wc1c_clean_woocommerce_attribute_options($is_full, $attribute_taxonomy);
-    }
-    else {
+    } else {
       $wc1c_requisite_properties[$wc1c_property['Ид']] = $wc1c_property;
     }
-  }
-  elseif (@$names[$depth - 1] == 'Классификатор' && $name == 'Свойства') {
+  } elseif (@$names[$depth - 1] == 'Классификатор' && $name == 'Свойства') {
     wc1c_clean_woocommerce_attributes($is_full);
 
     delete_transient('wc_attribute_taxonomies');
-  }
-  elseif (@$names[$depth - 1] == 'Товары' && $name == 'Товар') {
+  } elseif (@$names[$depth - 1] == 'Товары' && $name == 'Товар') {
     if ($wc1c_requisite_properties) {
       foreach ($wc1c_product['ЗначенияСвойств'] as $product_property) {
         if (!array_key_exists($product_property['Ид'], $wc1c_requisite_properties)) continue;
@@ -260,10 +400,9 @@ function wc1c_import_end_element_handler($is_full, $names, $depth, $name) {
         unset($_product, $_qnty);
       }
       unset($_post_id);
-    }
-    else {
+    } else {
       $guid = $wc1c_product['Ид'];
-      list($product_guid, ) = explode('#', $guid, 2);
+      list($product_guid,) = explode('#', $guid, 2);
 
       if (empty($wc1c_subproducts) || $wc1c_subproducts[0]['product_guid'] != $product_guid) {
         if ($wc1c_subproducts) wc1c_replace_subproducts($is_full, $wc1c_subproducts);
@@ -278,17 +417,16 @@ function wc1c_import_end_element_handler($is_full, $names, $depth, $name) {
         'product' => $wc1c_product,
       );
     }
-  }
-  elseif (@$names[$depth - 1] == 'Каталог' && $name == 'Товары') {
+  } elseif (@$names[$depth - 1] == 'Каталог' && $name == 'Товары') {
     if ($wc1c_subproducts) wc1c_replace_subproducts($is_full, $wc1c_subproducts);
 
     wc1c_clean_products($is_full);
     wc1c_clean_product_terms();
   }
- 
 }
 
-function wc1c_term_id_by_meta($key, $value) {
+function wc1c_term_id_by_meta($key, $value)
+{
   global $wpdb;
 
   if ($value === null) return;
@@ -305,7 +443,8 @@ function wc1c_term_id_by_meta($key, $value) {
   return $term_id;
 }
 
-function wc1c_unique_term_name($name, $taxonomy, $parent = null) {
+function wc1c_unique_term_name($name, $taxonomy, $parent = null)
+{
   global $wpdb;
 
   $name = htmlspecialchars($name);
@@ -327,7 +466,8 @@ function wc1c_unique_term_name($name, $taxonomy, $parent = null) {
   }
 }
 
-function wc1c_unique_term_slug($slug, $taxonomy, $parent = null) {
+function wc1c_unique_term_slug($slug, $taxonomy, $parent = null)
+{
   global $wpdb;
 
   while (true) {
@@ -355,7 +495,8 @@ function wc1c_unique_term_slug($slug, $taxonomy, $parent = null) {
   }
 }
 
-function wc1c_wp_unique_term_slug($slug, $term, $original_slug) {
+function wc1c_wp_unique_term_slug($slug, $term, $original_slug)
+{
   if (mb_strlen($slug) <= 200) return $slug;
 
   do {
@@ -363,14 +504,14 @@ function wc1c_wp_unique_term_slug($slug, $term, $original_slug) {
     $slug = mb_substr($slug, 0, mb_strlen($slug) - 1);
     $slug = urlencode($slug);
     $slug = wp_unique_term_slug($slug, $term);
-  }
-  while (mb_strlen($slug) > 200);
+  } while (mb_strlen($slug) > 200);
 
   return $slug;
 }
 add_filter('wp_unique_term_slug', 'wc1c_wp_unique_term_slug', 10, 3);
 
-function wc1c_replace_term($is_full, $guid, $parent_guid, $name, $taxonomy, $order, $use_guid_as_slug = false) {
+function wc1c_replace_term($is_full, $guid, $parent_guid, $name, $taxonomy, $order, $use_guid_as_slug = false)
+{
   global $wpdb;
 
   $term_id = wc1c_term_id_by_meta('wc1c_guid', "$taxonomy::$guid");
@@ -421,7 +562,8 @@ function wc1c_replace_term($is_full, $guid, $parent_guid, $name, $taxonomy, $ord
   update_term_meta($term_id, 'wc1c_timestamp', WC1C_TIMESTAMP);
 }
 
-function wc1c_replace_group($is_full, $group, $order, $groups) {
+function wc1c_replace_group($is_full, $group, $order, $groups)
+{
   $parent_groups = array_slice($groups, 0, -1);
   $group = apply_filters('wc1c_import_group_xml', $group, $parent_groups, $is_full);
   if (!$group) return;
@@ -432,7 +574,8 @@ function wc1c_replace_group($is_full, $group, $order, $groups) {
   return true;
 }
 
-function wc1c_unique_woocommerce_attribute_name($attribute_label) {
+function wc1c_unique_woocommerce_attribute_name($attribute_label)
+{
   global $wpdb;
 
   $attribute_name = wc_sanitize_taxonomy_name($attribute_label);
@@ -456,11 +599,12 @@ function wc1c_unique_woocommerce_attribute_name($attribute_label) {
   }
 }
 
-function wc1c_replace_woocommerce_attribute($is_full, $guid, $attribute_label, $attribute_type, $order, $preserve_fields) {
+function wc1c_replace_woocommerce_attribute($is_full, $guid, $attribute_label, $attribute_type, $order, $preserve_fields)
+{
   global $wpdb;
 
   $guids = get_option('wc1c_guid_attributes', array());
-  $attribute_id = $guids[$guid]??null;
+  $attribute_id = $guids[$guid] ?? null;
 
   if ($attribute_id) {
     $attribute_id = $wpdb->get_var($wpdb->prepare("SELECT attribute_id FROM {$wpdb->prefix}woocommerce_attribute_taxonomies WHERE attribute_id = %d", $attribute_id));
@@ -474,7 +618,7 @@ function wc1c_replace_woocommerce_attribute($is_full, $guid, $attribute_label, $
     $guids[$guid] = $attribute_id;
     update_option('wc1c_guid_attributes', $guids);
   }
-  
+
   if (!$attribute_id) {
     $attribute_name = wc1c_unique_woocommerce_attribute_name($attribute_label);
     $data = array_merge($data, array(
@@ -514,13 +658,15 @@ function wc1c_replace_woocommerce_attribute($is_full, $guid, $attribute_label, $
   return $attribute_id;
 }
 
-function wc1c_replace_property_option($property_option, $attribute_taxonomy, $order) {
+function wc1c_replace_property_option($property_option, $attribute_taxonomy, $order)
+{
   if (!isset($property_option['ИдЗначения'], $property_option['Значение'])) return;
 
   wc1c_replace_term(true, $property_option['ИдЗначения'], null, $property_option['Значение'], $attribute_taxonomy, $order, WC1C_USE_GUID_AS_PROPERTY_OPTION_SLUG);
 }
 
-function wc1c_replace_property($is_full, $property, $order) {
+function wc1c_replace_property($is_full, $property, $order)
+{
   $property = apply_filters('wc1c_import_property_xml', $property, $is_full);
   if (!$property) return;
 
@@ -544,7 +690,8 @@ function wc1c_replace_property($is_full, $property, $order) {
   return $attribute['taxonomy'];
 }
 
-function wc1c_replace_post($guid, $post_type, $is_deleted, $is_draft, $post_title, $post_name, $post_excerpt, $post_content, $post_meta, $category_taxonomy, $category_guids, $preserve_fields) {
+function wc1c_replace_post($guid, $post_type, $is_deleted, $is_draft, $post_title, $post_name, $post_excerpt, $post_content, $post_meta, $category_taxonomy, $category_guids, $preserve_fields)
+{
   $post_id = wc1c_post_id_by_meta('_wc1c_guid', $guid);
 
   if (!$post_excerpt) $post_excerpt = '';
@@ -568,8 +715,7 @@ function wc1c_replace_post($guid, $post_type, $is_deleted, $is_draft, $post_titl
     update_post_meta($post_id, '_wc1c_guid', $guid);
 
     $is_added = true;
-  }
-  else {
+  } else {
     $is_added = false;
   }
 
@@ -603,8 +749,7 @@ function wc1c_replace_post($guid, $post_type, $is_deleted, $is_draft, $post_titl
 
   if ($is_deleted && $post->post_status != 'trash') {
     wp_trash_post($post_id);
-  }
-  elseif (!$is_deleted && $post->post_status == 'trash') {
+  } elseif (!$is_deleted && $post->post_status == 'trash') {
     wp_untrash_post($post_id);
   }
 
@@ -614,7 +759,7 @@ function wc1c_replace_post($guid, $post_type, $is_deleted, $is_draft, $post_titl
   }
 
   foreach ($post_meta as $meta_key => $meta_value) {
-    if(!isset($current_post_meta[$meta_key]))
+    if (!isset($current_post_meta[$meta_key]))
       $current_post_meta[$meta_key] = null;
     $current_meta_value = @$current_post_meta[$meta_key];
     if ($current_meta_value == $meta_value) continue;
@@ -647,7 +792,8 @@ function wc1c_replace_post($guid, $post_type, $is_deleted, $is_draft, $post_titl
   return array($is_added, $post_id, $current_post_meta);
 }
 
-function wc1c_replace_post_attachments($post_id, $attachments) {
+function wc1c_replace_post_attachments($post_id, $attachments)
+{
   $data_dir = WC1C_DATA_DIR . "catalog";
 
   $attachment_path_by_hash = array();
@@ -683,15 +829,15 @@ function wc1c_replace_post_attachments($post_id, $attachments) {
     if (!file_exists($attachment_path)) continue;
 
     $attachment_hash = $attachment_hash_by_path[$attachment_path];
-    $attachment_id = $post_attachment_id_by_hash[$attachment_hash]??null;
+    $attachment_id = $post_attachment_id_by_hash[$attachment_hash] ?? null;
     if (!$attachment_id) {
       $file = array(
         'tmp_name' => $attachment_path,
         'name' => basename($attachment_path),
       );
-      $attachment_id = @media_handle_sideload($file, $post_id, $attachment['description']??null);
+      $attachment_id = @media_handle_sideload($file, $post_id, $attachment['description'] ?? null);
       wc1c_check_wp_error($attachment_id);
-      
+
       $uploaded_attachment_path = get_attached_file($attachment_id);
       if ($uploaded_attachment_path) copy($uploaded_attachment_path, $attachment_path);
     }
@@ -702,11 +848,13 @@ function wc1c_replace_post_attachments($post_id, $attachments) {
   return $attachment_ids;
 }
 
-function wc1c_replace_requisite_name_callback($matches) {
+function wc1c_replace_requisite_name_callback($matches)
+{
   return ' ' . mb_convert_case($matches[0], MB_CASE_LOWER, "UTF-8");
 }
 
-function wc1c_replace_product($is_full, $guid, $product) {
+function wc1c_replace_product($is_full, $guid, $product)
+{
   global $wc1c_is_moysklad;
 
   $product = apply_filters('wc1c_import_product_xml', $product, $is_full);
@@ -714,8 +862,8 @@ function wc1c_replace_product($is_full, $guid, $product) {
 
   $preserve_fields = apply_filters('wc1c_import_preserve_product_fields', array(), $product, $is_full);
 
-  $is_deleted = isset($product['Статус'])?$product['Статус'] == 'Удален':false;
-  $is_draft =  isset($product['Статус'])?$product['Статус'] == 'Черновик':false;
+  $is_deleted = isset($product['Статус']) ? $product['Статус'] == 'Удален' : false;
+  $is_draft =  isset($product['Статус']) ? $product['Статус'] == 'Черновик' : false;
 
   $post_title = @$product['Наименование'];
   if (!$post_title) return;
@@ -729,29 +877,24 @@ function wc1c_replace_product($is_full, $guid, $product) {
 
   foreach ($product['ЗначенияРеквизитов'] as $i => $requisite) {
     $value = @$requisite['Значение'][0];
-	if (!$value) continue;
+    if (!$value) continue;
     if ($requisite['Наименование'] == "Полное наименование") {
       if ($wc1c_is_moysklad) $post_content = $value;
       else $post_title = $value;
       unset($product['ЗначенияРеквизитов'][$i]);
-    }
-    elseif ($requisite['Наименование'] == "ОписаниеВФорматеHTML") {
+    } elseif ($requisite['Наименование'] == "ОписаниеВФорматеHTML") {
       $post_content = $value;
       unset($product['ЗначенияРеквизитов'][$i]);
-    }
-    elseif ($requisite['Наименование'] == "Длина") {
+    } elseif ($requisite['Наименование'] == "Длина") {
       $post_meta['_length'] = floatval($value);
       unset($product['ЗначенияРеквизитов'][$i]);
-    }
-    elseif ($requisite['Наименование'] == "Ширина") {
+    } elseif ($requisite['Наименование'] == "Ширина") {
       $post_meta['_width'] = floatval($value);
       unset($product['ЗначенияРеквизитов'][$i]);
-    }
-    elseif ($requisite['Наименование'] == "Высота") {
+    } elseif ($requisite['Наименование'] == "Высота") {
       $post_meta['_height'] = floatval($value);
       unset($product['ЗначенияРеквизитов'][$i]);
-    }
-    elseif ($requisite['Наименование'] == "Вес") {
+    } elseif ($requisite['Наименование'] == "Вес") {
       $post_meta['_weight'] = floatval($value);
       unset($product['ЗначенияРеквизитов'][$i]);
     }
@@ -774,7 +917,7 @@ function wc1c_replace_product($is_full, $guid, $product) {
 
   $current_product_attributes = isset($post_meta['_product_attributes']) ? maybe_unserialize($post_meta['_product_attributes']) : array();
 
-  $current_product_attribute_variations = array(); 
+  $current_product_attribute_variations = array();
   foreach ($current_product_attributes as $current_product_attribute_key => $current_product_attribute) {
     if (!$current_product_attribute['is_variation']) continue;
 
@@ -822,12 +965,10 @@ function wc1c_replace_product($is_full, $guid, $product) {
           if ($attribute['attribute_type'] == 'select' && preg_match("/^\w+-\w+-\w+-\w+-\w+$/", $property_value)) {
             $term_id = wc1c_term_id_by_meta('wc1c_guid', "{$attribute['taxonomy']}::$property_value");
             if ($term_id) $attribute_terms[] = (int) $term_id;
-          }
-          else {
+          } else {
             if (!defined('WC1C_MULTIPLE_VALUES_DELIMETER')) {
               $attribute_values[] = $property_value;
-            }
-            else {
+            } else {
               $term_names = explode(WC1C_MULTIPLE_VALUES_DELIMETER, $property_value);
               $term_names = array_map('trim', $term_names);
               foreach ($term_names as $term_name) {
@@ -861,8 +1002,7 @@ function wc1c_replace_product($is_full, $guid, $product) {
         if ($attribute_terms) {
           $product_attribute['name'] = $attribute['taxonomy'];
           $product_attribute['is_taxonomy'] = 1;
-        }
-        elseif ($attribute_values) {
+        } elseif ($attribute_values) {
           $product_attribute['name'] = $attribute['attribute_label'];
           $product_attribute['value'] = implode(" | ", $attribute_values);
         }
@@ -926,8 +1066,7 @@ function wc1c_replace_product($is_full, $guid, $product) {
     foreach ($old_product_attributes as $old_product_attribute) {
       if ($old_product_attribute['is_taxonomy']) {
         $old_taxonomies[] = $old_product_attribute['name'];
-      }
-      else {
+      } else {
         $key = array_search($old_product_attribute, $product_attributes);
         if ($key !== false) unset($product_attributes[$key]);
       }
@@ -966,7 +1105,7 @@ function wc1c_replace_product($is_full, $guid, $product) {
 
         $attribute_value = $attribute_values[0];
         if (strpos($attribute_value, "import_files/") !== 0) continue;
-          
+
         list($picture_path, $attribute_value) = explode('#', $attribute_value, 2);
         if (!isset($attachments[$picture_path])) continue;
 
@@ -983,7 +1122,7 @@ function wc1c_replace_product($is_full, $guid, $product) {
         '_thumbnail_id' => @$attachment_ids[0],
       );
       foreach ($new_post_meta as $meta_key => $meta_value) {
-        if ($meta_value != ($post_meta[$meta_key]??null)) update_post_meta($post_id, $meta_key, $meta_value);
+        if ($meta_value != ($post_meta[$meta_key] ?? null)) update_post_meta($post_id, $meta_key, $meta_value);
       }
     }
   }
@@ -993,13 +1132,15 @@ function wc1c_replace_product($is_full, $guid, $product) {
   return $post_id;
 }
 
-function wc1c_replace_subproducts($is_full, $subproducts) {
+function wc1c_replace_subproducts($is_full, $subproducts)
+{
   require_once sprintf(WC1C_PLUGIN_DIR . "exchange/offers.php");
 
   wc1c_replace_suboffers($is_full, $subproducts, true);
 }
 
-function wc1c_clean_woocommerce_categories($is_full) {
+function wc1c_clean_woocommerce_categories($is_full)
+{
   global $wpdb;
 
   if (!$is_full || WC1C_PREVENT_CLEAN) return;
@@ -1016,7 +1157,8 @@ function wc1c_clean_woocommerce_categories($is_full) {
   }
 }
 
-function wc1c_clean_woocommerce_attributes($is_full) {
+function wc1c_clean_woocommerce_attributes($is_full)
+{
   global $wpdb;
 
   if (!$is_full || WC1C_PREVENT_CLEAN) return;
@@ -1039,7 +1181,7 @@ function wc1c_clean_woocommerce_attributes($is_full) {
     if (!$attribute) continue;
 
     wc1c_delete_woocommerce_attribute($attribute_id);
-    
+
     unset($guids[$guid]);
     unset($timestamps[$guid]);
 
@@ -1059,7 +1201,8 @@ function wc1c_clean_woocommerce_attributes($is_full) {
   }
 }
 
-function wc1c_clean_woocommerce_attribute_options($is_full, $attribute_taxonomy) {
+function wc1c_clean_woocommerce_attribute_options($is_full, $attribute_taxonomy)
+{
   global $wpdb;
 
   if (!$is_full || WC1C_PREVENT_CLEAN) return;
@@ -1073,7 +1216,8 @@ function wc1c_clean_woocommerce_attribute_options($is_full, $attribute_taxonomy)
   }
 }
 
-function wc1c_clean_posts($post_type) {
+function wc1c_clean_posts($post_type)
+{
   global $wpdb;
 
   $post_ids = $wpdb->get_col($wpdb->prepare("SELECT post_id FROM $wpdb->postmeta JOIN $wpdb->posts ON post_id = ID WHERE post_type = %s AND meta_key = '_wc1c_timestamp' AND meta_value != %d", $post_type, WC1C_TIMESTAMP));
@@ -1084,13 +1228,15 @@ function wc1c_clean_posts($post_type) {
   }
 }
 
-function wc1c_clean_products($is_full) {
+function wc1c_clean_products($is_full)
+{
   if (!$is_full || WC1C_PREVENT_CLEAN) return;
 
   wc1c_clean_posts('product');
 }
 
-function wc1c_clean_product_terms() {
+function wc1c_clean_product_terms()
+{
   global $wpdb;
 
   $wpdb->query("UPDATE $wpdb->term_taxonomy tt SET count = (SELECT COUNT(*) FROM $wpdb->term_relationships WHERE term_taxonomy_id = tt.term_taxonomy_id) WHERE taxonomy LIKE 'pa_%'");
