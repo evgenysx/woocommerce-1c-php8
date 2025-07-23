@@ -34,6 +34,10 @@ function getCategoryBy_1cId($category_1c)
     $groupSlug = "batt";
   if ($category_1c == '4328aad2-eadb-11ef-854e-5404a6a42763')
     $groupSlug = "batt";
+  // Тяговые АКБ
+  if ($category_1c == '58211538-46a1-11f0-8ddb-3cd92bfac748')
+    $groupSlug = "batt";
+  
   return get_term_by('slug', $groupSlug, 'product_cat');
 }
 
